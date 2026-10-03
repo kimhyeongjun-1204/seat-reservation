@@ -44,7 +44,7 @@
 ### D-1. 점유 판정 기준: seat 행 (A안)
 - seat.status ∈ {AVAILABLE, HELD, SOLD} + seat.hold_id + seat.hold_expires_at. 점유 판정은 seat 행만 본다
 - hold(user_id, status, expires_at)와 hold_seat(선점-좌석 매핑)는 기록·조회용. hold.status가 ACTIVE여도 만료 시각이 지났으면 만료로 취급
-- ck_seat_state CHECK: AVAILABLE이면 hold_id·만료시각 NULL / HELD면 둘 다 NOT NULL / SOLD면 hold_id NOT NULL
+- ck_seat_state CHECK: AVAILABLE이면 hold_id·만료시각 NULL / HELD면 둘 다 NOT NULL / SOLD면 hold_id NOT NULL·만료시각 NULL (D-6)
 - 선점·취소·확정 = 조건부 UPDATE + 영향받은 행 수 검사. 불일치 시 트랜잭션 롤백
 - 선점 순서(seat.hold_id FK 때문): hold INSERT → seat UPDATE → hold_seat INSERT, 한 트랜잭션
 - 만료 판정은 WHERE 절의 `NOW(6)` 비교 (지연 만료). 앱 서버 시계(Instant.now())로 판정 금지
@@ -95,10 +95,72 @@
   - 만료된 기록이 정리되지 않고 쌓임
 - 필수 테스트: 만료 시각을 과거로 바꾼 HELD 좌석이 조회에서 AVAILABLE로 나온다
 
+### D-6. V1 스키마·초기 데이터
+- 테이블: performance / hold / seat / hold_seat (payment·payment_event는 4번 확정 후 V1에 추가)
+- 시각 컬럼은 TIMESTAMP(6). DATETIME 사용 금지 (세션 시간대가 달라도 NOW(6) 비교 결과가 같아야 함)
+- hold.status CHECK: ACTIVE / CANCELLED / CONFIRMED
+- ck_seat_state: AVAILABLE(hold_id·만료 NULL) / HELD(둘 다 NOT NULL) / SOLD(hold_id NOT NULL, 만료 NULL)
+- 판매 확정 UPDATE는 hold_expires_at = NULL로 비운다
+- 인덱스: seat UNIQUE(performance_id, seat_no), seat(hold_id), hold_seat(seat_id)
+- 초기 데이터: V2__seed_data.sql, 공연 1개 × 좌석 1,000석(A-1~J-100, id 1~1000). A열(id 1~100)이 인기 구간
+  - seq_0_to_999(Sequence 엔진) 사용. 테스트 컨테이너에서 동작 확인 필요
+- 테스트는 초기 데이터에 의존하지 않고 각자 공연·좌석을 만든다
+- request_key는 넣지 않는다 → NOT-DONE(선점 요청 멱등성 미구현). 시간이 남으면 V3으로 추가
+- 확인할 것: Instant 필드와 TIMESTAMP(6) 컬럼이 ddl-auto validate를 통과하는지
+- 필수 테스트: 세션 time_zone '+09:00' 연결에서 선점하고 '+00:00' 연결에서 판정해도 결과가 같다
+
+### D-7. API 형식
+- GET /performances/{id}/seats → 200 [{seatId, seatNo, status}]. status는 D-5 계산값, holdId·userId는 내보내지 않음. 공연 없으면 404
+- POST /holds + X-User-Id, 본문 {performanceId, seatIds} → 201 {holdId, performanceId, seatIds, expiresAt}
+- seatIds는 1~10개, 중복 불가. 위반하거나 X-User-Id가 없으면 400
+- DELETE /holds/{holdId} + X-User-Id → 204 / 404 (D-3)
+- 에러: ProblemDetail(RFC 9457) + code 필드
+  400 INVALID_REQUEST / 404 PERFORMANCE_NOT_FOUND, HOLD_NOT_FOUND / 409 SEAT_UNAVAILABLE, LOCK_CONFLICT, PAYMENT_CONFLICT
+- 시각: ISO-8601 UTC 문자열. Jackson 3 기본 동작인지 실제 응답으로 확인
+
+### D-8. 결제 이벤트 (POST /payment-events)
+- 요청: {eventId, paymentId, holdId, status: approved|cancelled, occurredAt}. 형식 오류는 400
+- 테이블 (V1에 추가):
+  - payment(payment_id VARCHAR(64) PK, hold_id VARCHAR(36) NOT NULL UNIQUE FK→hold,
+    status CHECK IN ('APPROVED','REFUND_REQUIRED','CANCELLED'), created_at·updated_at TIMESTAMP(6))
+  - payment_event(event_id VARCHAR(64) PK, payment_id, hold_id, status CHECK IN ('approved','cancelled'),
+    occurred_at·received_at TIMESTAMP(6), result) — 이벤트를 먼저 기록하므로 payment FK는 두지 않음
+- 연결: 이벤트의 holdId가 존재하는지 확인하고, 그 paymentId의 첫 이벤트에서 payment 행을 만든다.
+  payment_id PK, hold_id UNIQUE → 결제 하나 ↔ 선점 하나. 기존 연결과 다른 조합이면 409 PAYMENT_CONFLICT
+- 처리 순서 (한 트랜잭션):
+  1. INSERT IGNORE INTO payment_event … → 영향 0행이면 중복: 아무것도 바꾸지 않고 200 DUPLICATE
+  2. SELECT … FROM hold WHERE id = ? FOR UPDATE → 없으면 404 HOLD_NOT_FOUND (롤백)
+  3. payment 조회 → 연결 불일치이거나 동시 INSERT로 중복 키가 나면 409 PAYMENT_CONFLICT (롤백)
+  4. 전이표 적용 → payment INSERT/UPDATE → payment_event.result 기록 (APPLIED / IGNORED)
+- 승인 시 좌석 확정:
+  a. SELECT s.id FROM seat s JOIN hold_seat hs ON hs.seat_id = s.id WHERE hs.hold_id = ? ORDER BY s.id FOR UPDATE
+     (좌석을 먼저 모두 잠가 경계 시각에 일부만 SOLD 되는 것을 막음)
+  b. UPDATE seat SET status = 'SOLD', hold_expires_at = NULL
+     WHERE hold_id = ? AND status = 'HELD' AND hold_expires_at > NOW(6) → n
+  c. n = 선점 좌석 수 → UPDATE hold SET status = 'CONFIRMED' WHERE id = ? AND status = 'ACTIVE', payment APPROVED
+     n = 0 → 좌석·hold는 그대로, payment REFUND_REQUIRED
+     그 외 → 예외(불변식 위반) → 롤백
+- 전이표:
+  - 없음 + approved → 확정 성공이면 APPROVED, 실패면 REFUND_REQUIRED
+  - 없음 + cancelled → CANCELLED. 선점이 유효하면 해제 (D-3과 같은 hold → seat UPDATE)
+  - APPROVED + cancelled → CANCELLED. 좌석 SOLD → AVAILABLE(hold_id·만료 NULL), hold CONFIRMED → CANCELLED
+  - REFUND_REQUIRED + cancelled → CANCELLED (환불 완료로 간주)
+  - CANCELLED + 모든 이벤트, APPROVED·REFUND_REQUIRED + approved → IGNORED
+- 응답: 200 {eventId, result: APPLIED|IGNORED|DUPLICATE, paymentStatus} / 400 / 404 HOLD_NOT_FOUND / 409 PAYMENT_CONFLICT
+- 잠금 순서: 모든 작업에서 hold → payment → seat (seat는 PK 오름차순)
+- 만료 판정은 처리 시점 NOW(6). occurredAt은 기록만 한다
+- 사용자용 결제 상태 조회 API는 두지 않음 → NOT-DONE. 운영자는 REFUND_REQUIRED를 SQL로 조회 (README에 기록)
+- 실제 서비스라면 필요한 이벤트 서명 검증·금액 대조는 하지 않음 → NOT-DONE
+- 필수 테스트:
+  - 같은 eventId 동시 N회 → payment_event 1행, 좌석 SOLD·hold CONFIRMED 한 번
+  - cancelled 먼저 → approved 나중 → 최종 CANCELLED, 좌석 AVAILABLE
+  - 만료된 hold에 approved → REFUND_REQUIRED, 좌석 SOLD 아님
+  - 경계 시각에 승인과 다른 사용자 재선점 동시 → 좌석은 SOLD와 새 HELD 중 하나만, 결제 상태도 그 결과와 일치
+  - 승인과 사용자 취소 동시 → 데드락 없이 하나만 성공
+  - APPROVED 후 cancelled → 좌석 AVAILABLE / REFUND_REQUIRED 후 cancelled → CANCELLED
+
 ## 미정
-- request_key: V1에 컬럼·UNIQUE(user_id, request_key)만 선반영, 구현은 결제 이벤트 이후 (확정 대기)
-- payment 테이블과 결제 이벤트 규칙 (4번)
-- SOLD 좌석의 hold_expires_at 처리(NULL로 비울지 유지할지)와 ck_seat_state 반영 — 4번과 함께 결정
+- (없음)
 
 ## 불변식 (모든 설계·테스트는 이걸 깨뜨리려는 방향으로 검증)
 - 한 좌석에 만료되지 않은 점유(HELD) 또는 SOLD는 최대 1개
