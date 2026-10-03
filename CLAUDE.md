@@ -84,9 +84,19 @@
   {1,2}와 {2,1} 교차 동시 요청 → 불변식 유지, 데드락 횟수 측정 / 만료된 HELD 재선점 성공, 유효한 HELD·SOLD 선점 실패 /
   중복 seatId → 400
 
+### D-5. 만료 처리: 지연 만료만 (별도 작업 없음)
+- 만료 판정은 각 쿼리의 WHERE 절 시간 조건으로만 한다. 스케줄러·정리 작업은 두지 않는다
+- 좌석 조회: CASE WHEN status = 'HELD' AND hold_expires_at <= NOW(6) THEN 'AVAILABLE' ELSE status END
+- hold.status ∈ {ACTIVE, CANCELLED, CONFIRMED}. EXPIRED 값은 없고, 만료는 expires_at <= NOW(6)로 판정
+- 한계 (NOT-DONE 기록 대상):
+  - DB에 만료된 선점이 seat HELD / hold ACTIVE로 남는다 → 직접 조회·집계할 때 항상 시간 조건 필요
+  - 새 쿼리에서 시간 조건을 빠뜨리면 만료된 선점을 유효로 취급하는 버그 → 테스트로 보완
+  - 만료 시점에 실행되는 코드가 없어 만료 알림 같은 후속 처리를 붙일 수 없음
+  - 만료된 기록이 정리되지 않고 쌓임
+- 필수 테스트: 만료 시각을 과거로 바꾼 HELD 좌석이 조회에서 AVAILABLE로 나온다
+
 ## 미정
 - request_key: V1에 컬럼·UNIQUE(user_id, request_key)만 선반영, 구현은 결제 이벤트 이후 (확정 대기)
-- 만료 보조 작업 여부 (3번)
 - payment 테이블과 결제 이벤트 규칙 (4번)
 - SOLD 좌석의 hold_expires_at 처리(NULL로 비울지 유지할지)와 ck_seat_state 반영 — 4번과 함께 결정
 
