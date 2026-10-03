@@ -12,7 +12,7 @@ class TestcontainersConfiguration {
 	@Bean
 	@ServiceConnection
 	MariaDBContainer mariaDbContainer() {
-		return new MariaDBContainer(DockerImageName.parse("mariadb:latest"));
+		return new MariaDBContainer(DockerImageName.parse("mariadb:11.4"));
 	}
 
 }
