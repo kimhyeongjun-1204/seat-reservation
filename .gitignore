@@ -42,3 +42,6 @@ docs/assignment.pdf
 ### Claude Code ###
 .claude/settings.local.json
 CLAUDE.local.md
+
+### Windows 보안 격리 임시 폴더 ###
+~BROMIUM/

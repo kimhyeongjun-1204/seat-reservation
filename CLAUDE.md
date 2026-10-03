@@ -41,4 +41,42 @@
 - NOT-DONE.md 또는 AI-USAGE.md에 추가할 후보가 있으면 함께 제시
 
 ## 확정된 설계
-(설계 논의 후 채움)
+### D-1. 점유 판정 기준: seat 행 (A안)
+- seat.status ∈ {AVAILABLE, HELD, SOLD} + seat.hold_id + seat.hold_expires_at. 점유 판정은 seat 행만 본다
+- hold(user_id, status, expires_at)와 hold_seat(선점-좌석 매핑)는 기록·조회용. hold.status가 ACTIVE여도 만료 시각이 지났으면 만료로 취급
+- ck_seat_state CHECK: AVAILABLE이면 hold_id·만료시각 NULL / HELD면 둘 다 NOT NULL / SOLD면 hold_id NOT NULL
+- 선점·취소·확정 = 조건부 UPDATE + 영향받은 행 수 검사. 불일치 시 트랜잭션 롤백
+- 선점 순서(seat.hold_id FK 때문): hold INSERT → seat UPDATE → hold_seat INSERT, 한 트랜잭션
+- 만료 판정은 WHERE 절의 `NOW(6)` 비교 (지연 만료). 앱 서버 시계(Instant.now())로 판정 금지
+- 만료 테스트는 TTL 설정값을 줄이거나 만료 시각 컬럼을 과거로 직접 UPDATE해서 작성
+- seat와 hold를 함께 바꾸는 작업은 반드시 한 트랜잭션
+- 금지: seat UPDATE에서 status·만료 조건 생략 (CHECK가 막지 못하는 유일한 구멍)
+- 주의: Hibernate 7은 @Enumerated(STRING)을 MariaDB 네이티브 ENUM으로 기대할 수 있음 → VARCHAR 컬럼과 validate 불일치 시 @JdbcTypeCode(SqlTypes.VARCHAR)로 해결, 발생하면 AI-USAGE.md에 기록
+
+### D-2. holdId: UUID v4 문자열
+- 애플리케이션에서 UUID.randomUUID()로 생성, VARCHAR(36). INSERT 전에 ID 확정
+- 추측 방지 목적일 뿐 인가가 아님 → D-3과 함께 사용
+
+### D-3. 선점 취소
+- DELETE /holds/{holdId} + X-User-Id 헤더
+- hold: UPDATE hold SET status = 'CANCELLED' WHERE id = ? AND user_id = ? AND status = 'ACTIVE' AND expires_at > NOW(6)
+- 영향받은 행 0이면 404 (주인 아님·없음·이미 취소·확정·만료 모두 동일)
+- 성공 시 같은 트랜잭션에서 seat 해제: UPDATE seat SET status = 'AVAILABLE', hold_id = NULL, hold_expires_at = NULL WHERE hold_id = ? AND status = 'HELD'
+- 필수 테스트: 다른 사용자의 취소 → 404, 좌석 HELD 유지 / 만료된 선점 취소 → 404
+
+## 미정
+- request_key: V1에 컬럼·UNIQUE(user_id, request_key)만 선반영, 구현은 결제 이벤트 이후 (확정 대기)
+- 선점 쿼리·락 방식 (2번)
+- 만료 보조 작업 여부 (3번)
+- payment 테이블과 결제 이벤트 규칙 (4번)
+- SOLD 좌석의 hold_expires_at 처리(NULL로 비울지 유지할지)와 ck_seat_state 반영 — 4번과 함께 결정
+
+## 불변식 (모든 설계·테스트는 이걸 깨뜨리려는 방향으로 검증)
+- 한 좌석에 만료되지 않은 점유(HELD) 또는 SOLD는 최대 1개
+- 하나의 선점 요청은 모든 좌석 성공 또는 전부 실패 (부분 선점 없음)
+- 같은 선점 요청·같은 eventId는 몇 번 와도 한 번만 반영
+- 결제 하나(paymentId)는 hold 하나에만 연결
+- 종료 상태가 된 결제는 늦게 도착한 이벤트로 되살아나지 않음 (순서 역전 대비)
+- SOLD 좌석은 문서화한 결제 취소 규칙 외에는 다른 상태로 바뀌지 않음
+- 만료 판정은 DB 시각(NOW(6)) 기준, 앱 서버 시계로 판정하지 않음
+
