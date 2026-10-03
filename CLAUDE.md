@@ -64,9 +64,28 @@
 - 성공 시 같은 트랜잭션에서 seat 해제: UPDATE seat SET status = 'AVAILABLE', hold_id = NULL, hold_expires_at = NULL WHERE hold_id = ? AND status = 'HELD'
 - 필수 테스트: 다른 사용자의 취소 → 404, 좌석 HELD 유지 / 만료된 선점 취소 → 404
 
+### D-4. 선점 쿼리·락 방식
+- 요청 검증: seatIds가 비었거나 중복이 있으면 400 (DB 접근 전)
+- 한 트랜잭션: hold INSERT → seat 다중 UPDATE 한 문장 → hold_seat INSERT
+- 만료 시각은 hold INSERT에서 한 번만 계산: expires_at = NOW(6) + INTERVAL :ttl SECOND
+- seat UPDATE (만료 시각은 hold 값을 복사):
+  UPDATE seat SET status = 'HELD', hold_id = :holdId,
+  hold_expires_at = (SELECT expires_at FROM hold WHERE id = :holdId)
+  WHERE performance_id = :performanceId AND id IN (:seatIds)
+  AND (status = 'AVAILABLE' OR (status = 'HELD' AND hold_expires_at <= NOW(6)))
+- 영향받은 행 수 ≠ seatIds 개수 → 예외 → 전체 롤백 → 409 (어느 좌석이 원인인지는 응답하지 않음)
+- 존재하지 않는 좌석·다른 공연 좌석이 섞여도 행 수 불일치로 보고 409 (경합과 구분하지 않음)
+  - 시간이 남으면 실패 시에만 존재 여부를 COUNT로 확인해 404로 구분(C안). 못 하면 NOT-DONE에 기록
+- 데드락(1213)·락 대기 초과(1205)는 재시도 없이 409
+- 격리 수준은 기본값(REPEATABLE READ) 유지
+- 같은 트랜잭션에서 seat 엔티티를 미리 조회하지 않는다 (네이티브 UPDATE는 영속성 컨텍스트를 거치지 않아 값이 어긋남)
+- 확인할 것: EXPLAIN으로 PRIMARY 범위 스캔인지, 테스트 컨테이너에서 @@innodb_snapshot_isolation 값
+- 필수 테스트: 같은 좌석 동시 선점 → 1건만 성공 / 일부 좌석 실패 → 전부 롤백(hold·hold_seat 행 없음) /
+  {1,2}와 {2,1} 교차 동시 요청 → 불변식 유지, 데드락 횟수 측정 / 만료된 HELD 재선점 성공, 유효한 HELD·SOLD 선점 실패 /
+  중복 seatId → 400
+
 ## 미정
 - request_key: V1에 컬럼·UNIQUE(user_id, request_key)만 선반영, 구현은 결제 이벤트 이후 (확정 대기)
-- 선점 쿼리·락 방식 (2번)
 - 만료 보조 작업 여부 (3번)
 - payment 테이블과 결제 이벤트 규칙 (4번)
 - SOLD 좌석의 hold_expires_at 처리(NULL로 비울지 유지할지)와 ck_seat_state 반영 — 4번과 함께 결정
