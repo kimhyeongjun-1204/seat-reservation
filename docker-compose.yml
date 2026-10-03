@@ -1,0 +1,16 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: seat-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: seat
+      MARIADB_USER: seat
+      MARIADB_PASSWORD: seat
+    ports:
+      - "3307:3306"
+    volumes:
+      - seat-mariadb-data:/var/lib/mysql
+
+volumes:
+  seat-mariadb-data:
