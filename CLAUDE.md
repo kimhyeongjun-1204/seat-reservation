@@ -108,6 +108,8 @@
 - request_key는 넣지 않는다 → NOT-DONE(선점 요청 멱등성 미구현). 시간이 남으면 V3으로 추가
 - 확인할 것: Instant 필드와 TIMESTAMP(6) 컬럼이 ddl-auto validate를 통과하는지
 - 필수 테스트: 세션 time_zone '+09:00' 연결에서 선점하고 '+00:00' 연결에서 판정해도 결과가 같다
+- 컬럼 세부: performance(id, title, starts_at), hold.user_id VARCHAR(64), hold.performance_id FK, hold.created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6), seat.id AUTO_INCREMENT(초기 데이터만 id 명시), hold_seat PK(hold_id, seat_id), payment_event.result VARCHAR(16) NULL + CHECK(APPLIED/IGNORED, INSERT 시 NULL)
+- 엔티티는 validate·조회용. 쓰기(INSERT·UPDATE)는 모두 네이티브 @Modifying (hold INSERT 포함, save() 금지). 쓰기 전 같은 트랜잭션에서 엔티티 조회 금지 (필요 시 clearAutomatically = true)
 
 ### D-7. API 형식
 - GET /performances/{id}/seats → 200 [{seatId, seatNo, status}]. status는 D-5 계산값, holdId·userId는 내보내지 않음. 공연 없으면 404
@@ -117,6 +119,8 @@
 - 에러: ProblemDetail(RFC 9457) + code 필드
   400 INVALID_REQUEST / 404 PERFORMANCE_NOT_FOUND, HOLD_NOT_FOUND / 409 SEAT_UNAVAILABLE, LOCK_CONFLICT, PAYMENT_CONFLICT
 - 시각: ISO-8601 UTC 문자열. Jackson 3 기본 동작인지 실제 응답으로 확인
+- POST /holds의 공연이 없으면 404 PERFORMANCE_NOT_FOUND: hold INSERT 단계의 FK 위반(1452)만 변환, 다른 단계의 1452는 500. X-User-Id는 공백 불가·64자 이하. 응답 expiresAt은 INSERT 후 같은 트랜잭션에서 hold.expires_at을 다시 읽어 채움
+- 앱에서 DB 시각을 읽어 응답에 쓸 때는 UNIX_TIMESTAMP()로 읽는다. 엔티티의 Instant 필드는 세션 시간대가 UTC일 때만 정확하다.
 
 ### D-8. 결제 이벤트 (POST /payment-events)
 - 요청: {eventId, paymentId, holdId, status: approved|cancelled, occurredAt}. 형식 오류는 400
@@ -152,6 +156,7 @@
   - CANCELLED + 모든 이벤트, APPROVED·REFUND_REQUIRED + approved → IGNORED
 - 응답: 200 {eventId, result: APPLIED|IGNORED|DUPLICATE, paymentStatus} / 400 / 404 HOLD_NOT_FOUND / 409 PAYMENT_CONFLICT
 - 잠금 순서: 모든 작업에서 hold → payment → seat (seat는 PK 오름차순)
+- INSERT IGNORE, SELECT … FOR UPDATE도 네이티브 쿼리로 한다
 - 만료 판정은 처리 시점 NOW(6). occurredAt은 기록만 한다
 - 사용자용 결제 상태 조회 API는 두지 않음 → NOT-DONE. 운영자는 REFUND_REQUIRED를 SQL로 조회 (README에 기록)
 - 실제 서비스라면 필요한 이벤트 서명 검증·금액 대조는 하지 않음 → NOT-DONE
@@ -170,7 +175,7 @@
 ## 불변식 (모든 설계·테스트는 이걸 깨뜨리려는 방향으로 검증)
 - 한 좌석에 만료되지 않은 점유(HELD) 또는 SOLD는 최대 1개
 - 하나의 선점 요청은 모든 좌석 성공 또는 전부 실패 (부분 선점 없음)
-- 같은 선점 요청·같은 eventId는 몇 번 와도 한 번만 반영
+- 같은 eventId는 몇 번 와도 한 번만 반영된다. (같은 선점 요청의 재전송 멱등성은 미구현, NOT-DONE)
 - 결제 하나(paymentId)는 hold 하나에만 연결
 - 종료 상태가 된 결제는 늦게 도착한 이벤트로 되살아나지 않음 (순서 역전 대비)
 - SOLD 좌석은 문서화한 결제 취소 규칙 외에는 다른 상태로 바뀌지 않음
