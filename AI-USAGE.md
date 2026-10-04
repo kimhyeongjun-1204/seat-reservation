@@ -26,3 +26,4 @@
 | 10/3 | 선점 취소 조건을 `WHERE id = ? AND user_id = ? AND status = 'ACTIVE'`로 제안 | 확정된 지연 만료 규칙(D-1)과 대조한 결과, 만료됐지만 status가 ACTIVE인 선점도 취소가 성공해 "종료된 선점은 404" 규칙(D-3)과 어긋남 | 조건에 `AND expires_at > NOW(6)` 추가, "만료된 선점 취소 → 404" 테스트를 필수 테스트로 지정 |
 | 10/4 | 결제 이벤트 처리 시 payment 행을 `FOR UPDATE`로 먼저 잠그도록 제안 | 첫 이벤트 시점에는 payment 행이 없어, 없는 행 잠금(갭 락) 후 동시 INSERT로 데드락이 날 수 있음을 설계 검토에서 확인 | 항상 존재하는 hold 행을 먼저 잠그도록 변경, 잠금 순서를 hold → payment → seat로 통일 |
 | 10/4 | 결제 이벤트 중복 판정에 `INSERT IGNORE` 후 영향 행 수 0이면 중복으로 보도록 제안 | INSERT IGNORE가 CHECK 위반 등 다른 오류도 경고로 바꿔 행을 건너뛸 수 있어, 잘못된 status가 중복(200)으로 오판될 수 있음을 스키마 질문 검토 중 확인. MariaDB 11.4에서 status 'approve'로 INSERT IGNORE 시 영향 행 0·행 없음·경고 4025(`ck_payment_event_status` failed)를 스키마 테스트로 확인 | INSERT 전에 애플리케이션 입력 검증(400)을 필수로 두고, 잘못된 status 이벤트 테스트를 추가 |
+| 10/4 | 400 응답에 code를 붙이려고 `handleExceptionInternal`의 body 인자를 수정하도록 구현 | body 인자가 null로 들어오는 경우가 있고 ProblemDetail은 super에서 만들어져, code 누락으로 테스트 6건이 실패해 확인 | super 호출 결과의 본문에 code를 붙이도록 수정 |
