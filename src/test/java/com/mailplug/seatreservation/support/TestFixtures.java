@@ -79,6 +79,34 @@ public class TestFixtures {
 				performanceId);
 	}
 
+	/** 선점과 그 좌석의 만료 시각을 DB 시각 기준으로 지금부터 millis 뒤로 옮긴다 (경계 시각 경합용). */
+	public void expireHoldIn(String holdId, long millis) {
+		jdbc.update("UPDATE hold SET expires_at = NOW(6) + INTERVAL ? MICROSECOND WHERE id = ?", millis * 1000, holdId);
+		jdbc.update("""
+				UPDATE seat SET hold_expires_at = (SELECT expires_at FROM hold WHERE id = ?)
+				WHERE hold_id = ? AND status = 'HELD'
+				""", holdId, holdId);
+	}
+
+	public String paymentStatus(String paymentId) {
+		List<String> rows = jdbc.queryForList("SELECT status FROM payment WHERE payment_id = ?", String.class,
+				paymentId);
+		return rows.isEmpty() ? null : rows.get(0);
+	}
+
+	public int paymentEventCount(String eventId) {
+		return jdbc.queryForObject("SELECT COUNT(*) FROM payment_event WHERE event_id = ?", Integer.class, eventId);
+	}
+
+	public String paymentEventResult(String eventId) {
+		return jdbc.queryForObject("SELECT result FROM payment_event WHERE event_id = ?", String.class, eventId);
+	}
+
+	public int seatCountByStatus(String holdId, String status) {
+		return jdbc.queryForObject("SELECT COUNT(*) FROM seat WHERE hold_id = ? AND status = ?", Integer.class,
+				holdId, status);
+	}
+
 	public int holdSeatCount(long performanceId) {
 		return jdbc.queryForObject("""
 				SELECT COUNT(*) FROM hold_seat hs JOIN hold h ON h.id = hs.hold_id

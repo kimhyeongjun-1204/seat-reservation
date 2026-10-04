@@ -41,6 +41,21 @@
 - NOT-DONE.md 또는 AI-USAGE.md에 추가할 후보가 있으면 함께 제시
 
 ## 확정된 설계
+CLAUDE.md는 구현 규칙, DECISIONS.md는 선택 근거·대안·장단점을 적는다. 번호가 서로 다르므로 아래 대응표로 찾는다.
+결제 구현은 CLAUDE.md D-8을 따르되, 근거와 대안은 DECISIONS.md D-8~D-10을 참고한다.
+
+| CLAUDE.md | DECISIONS.md |
+|---|---|
+| D-1 점유 판정 기준 | D-1 |
+| D-2 holdId | D-2 |
+| D-3 선점 취소 | D-3 |
+| D-4 선점 쿼리·락 | D-4 |
+| D-5 만료 처리 | D-5 |
+| D-6 V1 스키마·초기 데이터 | D-6 (TIMESTAMP(6)) |
+| D-7 API 형식 | D-7 (오류 형식), D-12 (DB 시각 읽기) |
+| D-8 결제 이벤트 | D-8 (paymentId 연결), D-9 (중복·순서 역전), D-10 (만료와 승인 경합), D-13 (결제 트랜잭션 격리 수준) |
+| (설계 원칙: 정합성은 DB로만) | D-11 (재시작 후 판매 상태 유지) |
+
 ### D-1. 점유 판정 기준: seat 행 (A안)
 - seat.status ∈ {AVAILABLE, HELD, SOLD} + seat.hold_id + seat.hold_expires_at. 점유 판정은 seat 행만 본다
 - hold(user_id, status, expires_at)와 hold_seat(선점-좌석 매핑)는 기록·조회용. hold.status가 ACTIVE여도 만료 시각이 지났으면 만료로 취급
@@ -117,7 +132,8 @@
 - seatIds는 1~10개, 중복 불가. 위반하거나 X-User-Id가 없으면 400
 - DELETE /holds/{holdId} + X-User-Id → 204 / 404 (D-3)
 - 에러: ProblemDetail(RFC 9457) + code 필드
-  400 INVALID_REQUEST / 404 PERFORMANCE_NOT_FOUND, HOLD_NOT_FOUND / 409 SEAT_UNAVAILABLE, LOCK_CONFLICT, PAYMENT_CONFLICT
+  400 INVALID_REQUEST / 404 PERFORMANCE_NOT_FOUND, HOLD_NOT_FOUND / 409 SEAT_UNAVAILABLE, LOCK_CONFLICT(선점·취소), PAYMENT_CONFLICT / 503 LOCK_CONFLICT(결제 이벤트)
+- 1213·1205는 서버에서 재시도하지 않는다. 선점·취소는 409, 결제 이벤트는 재전송을 받기 위해 503 (같은 code, 상태만 다름). 예외를 잡고 같은 트랜잭션을 계속하지 않는다
 - 시각: ISO-8601 UTC 문자열. Jackson 3 기본 동작인지 실제 응답으로 확인
 - POST /holds의 공연이 없으면 404 PERFORMANCE_NOT_FOUND: hold INSERT 단계의 FK 위반(1452)만 변환, 다른 단계의 1452는 500. X-User-Id는 공백 불가·64자 이하. 응답 expiresAt은 INSERT 후 같은 트랜잭션에서 hold.expires_at을 다시 읽어 채움
 - 앱에서 DB 시각을 읽어 응답에 쓸 때는 UNIX_TIMESTAMP()로 읽는다. 엔티티의 Instant 필드는 세션 시간대가 UTC일 때만 정확하다.
@@ -131,17 +147,22 @@
     occurred_at·received_at TIMESTAMP(6), result) — 이벤트를 먼저 기록하므로 payment FK는 두지 않음
 - 연결: 이벤트의 holdId가 존재하는지 확인하고, 그 paymentId의 첫 이벤트에서 payment 행을 만든다.
   payment_id PK, hold_id UNIQUE → 결제 하나 ↔ 선점 하나. 기존 연결과 다른 조합이면 409 PAYMENT_CONFLICT
+- 결제 이벤트 트랜잭션만 READ COMMITTED (@Transactional(isolation = READ_COMMITTED)). 선점·취소는 RR 그대로 (DECISIONS D-13)
 - 처리 순서 (한 트랜잭션):
   0. (트랜잭션 전) 입력 검증: eventId·paymentId·holdId 존재와 길이(컬럼 길이 이내), status ∈ {approved, cancelled},
-     occurredAt ISO-8601 형식. 위반하면 400 INVALID_REQUEST, DB 접근 없음
+     occurredAt ISO-8601 형식이고 TIMESTAMP 범위(1970-01-01T00:00:01Z ~ 2038-01-19T03:14:07.999999Z) 안. 위반하면 400 INVALID_REQUEST, DB 접근 없음
      - 이유: INSERT IGNORE는 중복 키 외에 CHECK 위반도 경고(4025)로 바꿔 0행 처리함 → 검증 없으면 잘못된 이벤트가 DUPLICATE 200으로 오판됨
        (MariaDB 11.4.13에서 스키마 테스트로 확인)
   1. INSERT IGNORE INTO payment_event … → 영향 0행이면 중복: 아무것도 바꾸지 않고 200 DUPLICATE
+     - occurred_at은 Instant를 바인딩하지 않고 FROM_UNIXTIME(:epochSeconds)로 넣는다 (소수 초는 BigDecimal, D-12와 같은 원칙)
+     - DUPLICATE의 paymentStatus는 현재 커밋된 payment 상태, 없으면 null
   2. SELECT … FROM hold WHERE id = ? FOR UPDATE → 없으면 404 HOLD_NOT_FOUND (롤백)
-  3. payment 조회 → 연결 불일치이거나 동시 INSERT로 중복 키가 나면 409 PAYMENT_CONFLICT (롤백)
+  3. payment는 일반 SELECT로 읽는다 (FOR UPDATE 금지: 첫 이벤트 시점엔 행이 없어 갭 락 → 서로 다른 결제의 첫 이벤트끼리 데드락). RC라 최신 커밋 값을 읽는다.
+     paymentId 또는 holdId로 이미 연결된 행이 다른 조합이거나, payment INSERT가 중복 키(1062)면 409 PAYMENT_CONFLICT (롤백)
   4. 전이표 적용 → payment INSERT/UPDATE → payment_event.result 기록 (APPLIED / IGNORED)
 - 승인 시 좌석 확정:
-  a. SELECT s.id FROM seat s JOIN hold_seat hs ON hs.seat_id = s.id WHERE hs.hold_id = ? ORDER BY s.id FOR UPDATE
+  a. SELECT seat_id FROM hold_seat WHERE hold_id = ? (일반 SELECT, 선점 후 바뀌지 않는 기록)
+     → SELECT id FROM seat WHERE id IN (…) ORDER BY id FOR UPDATE
      (좌석을 먼저 모두 잠가 경계 시각에 일부만 SOLD 되는 것을 막음)
   b. UPDATE seat SET status = 'SOLD', hold_expires_at = NULL
      WHERE hold_id = ? AND status = 'HELD' AND hold_expires_at > NOW(6) → n
@@ -154,8 +175,9 @@
   - APPROVED + cancelled → CANCELLED. 좌석 SOLD → AVAILABLE(hold_id·만료 NULL), hold CONFIRMED → CANCELLED
   - REFUND_REQUIRED + cancelled → CANCELLED (환불 완료로 간주)
   - CANCELLED + 모든 이벤트, APPROVED·REFUND_REQUIRED + approved → IGNORED
-- 응답: 200 {eventId, result: APPLIED|IGNORED|DUPLICATE, paymentStatus} / 400 / 404 HOLD_NOT_FOUND / 409 PAYMENT_CONFLICT
-- 잠금 순서: 모든 작업에서 hold → payment → seat (seat는 PK 오름차순)
+- 응답: 200 {eventId, result: APPLIED|IGNORED|DUPLICATE, paymentStatus} / 400 / 404 HOLD_NOT_FOUND / 409 PAYMENT_CONFLICT / 503 LOCK_CONFLICT.
+  paymentStatus는 이번 트랜잭션이 처리한 결과 상태
+- 잠금 순서: hold → seat(PK 오름차순) → payment(쓰기 시점). payment는 잠그고 읽지 않는다
 - INSERT IGNORE, SELECT … FOR UPDATE도 네이티브 쿼리로 한다
 - 만료 판정은 처리 시점 NOW(6). occurredAt은 기록만 한다
 - 사용자용 결제 상태 조회 API는 두지 않음 → NOT-DONE. 운영자는 REFUND_REQUIRED를 SQL로 조회 (README에 기록)
@@ -168,6 +190,9 @@
   - 경계 시각에 승인과 다른 사용자 재선점 동시 → 좌석은 SOLD와 새 HELD 중 하나만, 결제 상태도 그 결과와 일치
   - 승인과 사용자 취소 동시 → 데드락 없이 하나만 성공
   - APPROVED 후 cancelled → 좌석 AVAILABLE / REFUND_REQUIRED 후 cancelled → CANCELLED
+  - 서로 다른 선점 50개의 첫 approved 동시 → LOCK_CONFLICT 0, 모두 APPROVED, 좌석 모두 SOLD
+  - 같은 paymentId의 approved·cancelled 동시 → 409 없이 최종 CANCELLED, 좌석 AVAILABLE
+  - 결제 이벤트 처리 중 락 대기 초과 → 503 LOCK_CONFLICT, payment_event 행 없음
 
 ## 미정
 - (없음)

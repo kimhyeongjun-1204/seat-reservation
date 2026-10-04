@@ -31,6 +31,29 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
 			""", nativeQuery = true)
 	int releaseHeld(@Param("holdId") String holdId);
 
+	/**
+	 * 승인 전에 선점 좌석을 모두 PK 오름차순으로 잠근다. 경계 시각에 일부만 SOLD가 되는 것을 막고,
+	 * 선점 UPDATE(PRIMARY 범위 스캔)와 같은 순서로 잠가 교차 대기를 피한다 (D-8 a).
+	 */
+	@Query(value = "SELECT id FROM seat WHERE id IN (:seatIds) ORDER BY id FOR UPDATE", nativeQuery = true)
+	List<Long> lockByIds(@Param("seatIds") Collection<Long> seatIds);
+
+	/** 유효한 선점의 좌석만 SOLD로. 만료 판정은 이 문장 실행 시점의 NOW(6) (D-8 b). */
+	@Modifying
+	@Query(value = """
+			UPDATE seat SET status = 'SOLD', hold_expires_at = NULL
+			WHERE hold_id = :holdId AND status = 'HELD' AND hold_expires_at > NOW(6)
+			""", nativeQuery = true)
+	int sell(@Param("holdId") String holdId);
+
+	/** 결제 취소로 판매를 되돌린다. SOLD가 바뀌는 유일한 경로 (불변식: 문서화한 결제 취소 규칙). */
+	@Modifying
+	@Query(value = """
+			UPDATE seat SET status = 'AVAILABLE', hold_id = NULL, hold_expires_at = NULL
+			WHERE hold_id = :holdId AND status = 'SOLD'
+			""", nativeQuery = true)
+	int releaseSold(@Param("holdId") String holdId);
+
 	/** 만료된 HELD는 AVAILABLE로 계산해서 돌려준다 (D-5). */
 	@Query(value = """
 			SELECT id AS seatId, seat_no AS seatNo,
