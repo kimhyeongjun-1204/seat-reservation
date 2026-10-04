@@ -98,6 +98,6 @@
 
 **선택한 방법**: 같은 결제의 approved와 cancelled가 거의 동시에 오면, 뒤에 처리되는 쪽은 앞 트랜잭션이 막 만든 payment 행을 읽어야 한다. REPEATABLE READ에서 일반 SELECT는 트랜잭션 안에서 처음 읽은 시점의 스냅샷(그때까지 커밋된 데이터의 사본)을 계속 보므로, 읽는 시점이 조금만 앞서도 이 행을 못 보고 INSERT하다 중복 키로 실패할 수 있다. 그렇다고 payment를 FOR UPDATE로 읽으면 첫 이벤트 시점에는 행이 없어 갭 락이 걸리고, 서로 다른 결제의 첫 이벤트끼리 데드락이 날 수 있다. 그래서 결제 이벤트 트랜잭션만 READ COMMITTED(문장마다 그 시점의 최신 커밋 값을 읽는 수준)로 실행하고 payment는 일반 SELECT로 읽으며, 선점·취소는 REPEATABLE READ를 유지한다. 같은 선점의 이벤트는 hold 행을 FOR UPDATE로 먼저 잠가 한 줄로 세우고, 승인 시 좌석은 hold_seat를 일반 SELECT로 읽은 뒤 seat를 PK 오름차순 FOR UPDATE로 잠근다.
 
-**검토한 대안**: REPEATABLE READ에서 payment를 FOR UPDATE로 읽는 방식은 항상 최신 값을 보지만, 위의 갭 락 데드락 위험이 있다(AI-USAGE 27행과 같은 문제). REPEATABLE READ에서 일반 SELECT로 읽는 방식은 hold를 잠근 뒤 처음 읽는다면 최신 값을 보지만, 잠금 전에 일반 SELECT가 한 번이라도 끼면(JPA 조회 포함) 오래된 스냅샷을 보게 되어 정합성이 코드의 읽기 순서에 달린다. 두 방식 모두 격리 수준을 바꾸지 않는다는 장점은 있었다.
+**검토한 대안**: REPEATABLE READ에서 payment를 FOR UPDATE로 읽는 방식은 항상 최신 값을 보지만, 위의 갭 락 데드락 위험이 있다(AI-USAGE.md의 "payment 행을 FOR UPDATE로 먼저 잠그도록 제안" 기록과 같은 문제). REPEATABLE READ에서 일반 SELECT로 읽는 방식은 hold를 잠근 뒤 처음 읽는다면 최신 값을 보지만, 잠금 전에 일반 SELECT가 한 번이라도 끼면(JPA 조회 포함) 오래된 스냅샷을 보게 되어 정합성이 코드의 읽기 순서에 달린다. 두 방식 모두 격리 수준을 바꾸지 않는다는 장점은 있었다.
 
 **장단점**: 격리 수준 하나로 오래된 읽기와 갭 락 데드락을 함께 피하고, 결제 코드에서 읽기 순서를 따질 일이 줄어든다. 로컬 Testcontainers(MariaDB 11.4.13)에서 서로 다른 선점 50개의 첫 승인 이벤트를 동시에 보냈을 때 락 충돌은 0건이었고 50건 모두 APPROVED, 좌석 100석이 모두 SOLD였으며, 같은 결제의 approved와 cancelled를 동시에 보낸 30회도 409 없이 모두 CANCELLED로 끝났다. 반면 선점·취소와 결제 트랜잭션의 격리 수준이 달라 동작을 설명할 때 구분해야 하고, READ COMMITTED에서는 같은 트랜잭션 안에서도 다시 읽으면 값이 바뀔 수 있어 판정은 잠근 행이나 조건부 UPDATE로만 해야 한다.
