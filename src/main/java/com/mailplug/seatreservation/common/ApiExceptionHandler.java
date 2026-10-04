@@ -17,7 +17,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
 	@ExceptionHandler(ApiException.class)
 	ProblemDetail handleApi(ApiException e) {
-		return problem(e.getCode(), e.getMessage());
+		ProblemDetail pd = ProblemDetail.forStatusAndDetail(e.getStatus(), e.getMessage());
+		pd.setProperty("code", e.getCode().name());
+		return pd;
 	}
 
 	/** 데드락(1213)·락 대기 초과(1205)는 재시도 없이 409 (D-4). */

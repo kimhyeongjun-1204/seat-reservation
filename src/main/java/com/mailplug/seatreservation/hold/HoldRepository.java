@@ -1,6 +1,7 @@
 package com.mailplug.seatreservation.hold;
 
 import java.math.BigDecimal;
+import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -31,6 +32,33 @@ public interface HoldRepository extends JpaRepository<Hold, String> {
 	 */
 	@Query(value = "SELECT UNIX_TIMESTAMP(expires_at) FROM hold WHERE id = :holdId", nativeQuery = true)
 	BigDecimal findExpiresAtEpochSeconds(@Param("holdId") String holdId);
+
+	/** 결제 이벤트 처리의 첫 잠금. 같은 선점에 대한 이벤트·취소를 한 줄로 세운다 (잠금 순서 hold → seat → payment). */
+	@Query(value = "SELECT id FROM hold WHERE id = :holdId FOR UPDATE", nativeQuery = true)
+	List<String> lockById(@Param("holdId") String holdId);
+
+	/** 승인 시 확정할 좌석 목록. 선점 후 바뀌지 않는 기록이라 잠그지 않고 읽는다. */
+	@Query(value = "SELECT seat_id FROM hold_seat WHERE hold_id = :holdId ORDER BY seat_id", nativeQuery = true)
+	List<Long> findSeatIds(@Param("holdId") String holdId);
+
+	/** 결제 승인으로 확정. 좌석 확정 UPDATE가 선점 좌석 수와 같을 때만 호출한다 (D-8 c). */
+	@Modifying
+	@Query(value = "UPDATE hold SET status = 'CONFIRMED' WHERE id = :holdId AND status = 'ACTIVE'", nativeQuery = true)
+	int confirm(@Param("holdId") String holdId);
+
+	/** 결제 취소로 유효한 선점을 해제 (사용자 확인 없음, D-8 전이표 "없음 + cancelled"). */
+	@Modifying
+	@Query(value = """
+			UPDATE hold SET status = 'CANCELLED'
+			WHERE id = :holdId AND status = 'ACTIVE' AND expires_at > NOW(6)
+			""", nativeQuery = true)
+	int cancelActiveByPayment(@Param("holdId") String holdId);
+
+	/** 결제 취소로 확정을 되돌림 (D-8 전이표 "APPROVED + cancelled"). */
+	@Modifying
+	@Query(value = "UPDATE hold SET status = 'CANCELLED' WHERE id = :holdId AND status = 'CONFIRMED'",
+			nativeQuery = true)
+	int cancelConfirmed(@Param("holdId") String holdId);
 
 	/** 주인·유효 여부를 한 문장에서 판정한다. 0행이면 원인과 관계없이 404 (D-3). */
 	@Modifying

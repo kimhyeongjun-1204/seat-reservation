@@ -2,9 +2,9 @@ package com.mailplug.seatreservation.hold;
 
 import com.mailplug.seatreservation.common.ApiException;
 import com.mailplug.seatreservation.common.ErrorCode;
+import com.mailplug.seatreservation.common.SqlErrors;
 import com.mailplug.seatreservation.seat.SeatRepository;
 import java.math.BigDecimal;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -16,8 +16,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @RequiredArgsConstructor
 public class HoldService {
-
-	private static final int ER_NO_REFERENCED_ROW = 1452;
 
 	private final HoldRepository holdRepository;
 	private final SeatRepository seatRepository;
@@ -35,7 +33,7 @@ public class HoldService {
 			holdRepository.insertActive(holdId, performanceId, userId, properties.ttl().toSeconds());
 		} catch (DataIntegrityViolationException e) {
 			// 404 변환은 hold INSERT의 FK 위반(performance_id)에만 적용한다. 다른 단계의 1452는 서버 오류로 둔다
-			if (sqlErrorCode(e) == ER_NO_REFERENCED_ROW) {
+			if (SqlErrors.errorCode(e) == SqlErrors.ER_NO_REFERENCED_ROW) {
 				throw new ApiException(ErrorCode.PERFORMANCE_NOT_FOUND, "performance not found");
 			}
 			throw e;
@@ -70,14 +68,5 @@ public class HoldService {
 		long seconds = parts[0].longValueExact();
 		long micros = parts[1].movePointRight(6).longValueExact();
 		return Instant.ofEpochSecond(seconds, micros * 1_000);
-	}
-
-	private static int sqlErrorCode(Throwable e) {
-		for (Throwable t = e; t != null; t = t.getCause()) {
-			if (t instanceof SQLException sql) {
-				return sql.getErrorCode();
-			}
-		}
-		return -1;
 	}
 }
