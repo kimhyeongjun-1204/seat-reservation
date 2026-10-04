@@ -91,10 +91,10 @@ CLAUDE.md는 구현 규칙, DECISIONS.md는 선택 근거·대안·장단점을 
 - 영향받은 행 수 ≠ seatIds 개수 → 예외 → 전체 롤백 → 409 (어느 좌석이 원인인지는 응답하지 않음)
 - 존재하지 않는 좌석·다른 공연 좌석이 섞여도 행 수 불일치로 보고 409 (경합과 구분하지 않음)
   - 시간이 남으면 실패 시에만 존재 여부를 COUNT로 확인해 404로 구분(C안). 못 하면 NOT-DONE에 기록
-- 데드락(1213)·락 대기 초과(1205)는 재시도 없이 409
+- 데드락(1213)·락 대기 초과(1205)는 재시도 없이 409 (선점·취소 기준. 결제 이벤트는 D-7의 503)
 - 격리 수준은 기본값(REPEATABLE READ) 유지
 - 같은 트랜잭션에서 seat 엔티티를 미리 조회하지 않는다 (네이티브 UPDATE는 영속성 컨텍스트를 거치지 않아 값이 어긋남)
-- 확인할 것: EXPLAIN으로 PRIMARY 범위 스캔인지, 테스트 컨테이너에서 @@innodb_snapshot_isolation 값
+- 확인 완료: EXPLAIN은 PRIMARY 범위 스캔(type=range, rows=요청 좌석 수), 테스트 컨테이너(MariaDB 11.4.13)의 @@innodb_snapshot_isolation = 0
 - 필수 테스트: 같은 좌석 동시 선점 → 1건만 성공 / 일부 좌석 실패 → 전부 롤백(hold·hold_seat 행 없음) /
   {1,2}와 {2,1} 교차 동시 요청 → 불변식 유지, 데드락 횟수 측정 / 만료된 HELD 재선점 성공, 유효한 HELD·SOLD 선점 실패 /
   중복 seatId → 400
@@ -118,10 +118,10 @@ CLAUDE.md는 구현 규칙, DECISIONS.md는 선택 근거·대안·장단점을 
 - 판매 확정 UPDATE는 hold_expires_at = NULL로 비운다
 - 인덱스: seat UNIQUE(performance_id, seat_no), seat(hold_id), hold_seat(seat_id)
 - 초기 데이터: V2__seed_data.sql, 공연 1개 × 좌석 1,000석(A-1~J-100, id 1~1000). A열(id 1~100)이 인기 구간
-  - seq_0_to_999(Sequence 엔진) 사용. 테스트 컨테이너에서 동작 확인 필요
+  - seq_0_to_999(Sequence 엔진) 사용. 테스트 컨테이너에서 동작 확인 완료 (SchemaMigrationTest)
 - 테스트는 초기 데이터에 의존하지 않고 각자 공연·좌석을 만든다
 - request_key는 넣지 않는다 → NOT-DONE(선점 요청 멱등성 미구현). 시간이 남으면 V3으로 추가
-- 확인할 것: Instant 필드와 TIMESTAMP(6) 컬럼이 ddl-auto validate를 통과하는지
+- 확인 완료: Instant 필드와 TIMESTAMP(6) 컬럼, @Enumerated(STRING)과 VARCHAR 컬럼 모두 ddl-auto validate 통과 (@JdbcTypeCode 불필요)
 - 필수 테스트: 세션 time_zone '+09:00' 연결에서 선점하고 '+00:00' 연결에서 판정해도 결과가 같다
 - 컬럼 세부: performance(id, title, starts_at), hold.user_id VARCHAR(64), hold.performance_id FK, hold.created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6), seat.id AUTO_INCREMENT(초기 데이터만 id 명시), hold_seat PK(hold_id, seat_id), payment_event.result VARCHAR(16) NULL + CHECK(APPLIED/IGNORED, INSERT 시 NULL)
 - 엔티티는 validate·조회용. 쓰기(INSERT·UPDATE)는 모두 네이티브 @Modifying (hold INSERT 포함, save() 금지). 쓰기 전 같은 트랜잭션에서 엔티티 조회 금지 (필요 시 clearAutomatically = true)
