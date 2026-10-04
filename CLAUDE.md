@@ -41,6 +41,21 @@
 - NOT-DONE.md 또는 AI-USAGE.md에 추가할 후보가 있으면 함께 제시
 
 ## 확정된 설계
+CLAUDE.md는 구현 규칙, DECISIONS.md는 선택 근거·대안·장단점을 적는다. 번호가 서로 다르므로 아래 대응표로 찾는다.
+결제 구현은 CLAUDE.md D-8을 따르되, 근거와 대안은 DECISIONS.md D-8~D-10을 참고한다.
+
+| CLAUDE.md | DECISIONS.md |
+|---|---|
+| D-1 점유 판정 기준 | D-1 |
+| D-2 holdId | D-2 |
+| D-3 선점 취소 | D-3 |
+| D-4 선점 쿼리·락 | D-4 |
+| D-5 만료 처리 | D-5 |
+| D-6 V1 스키마·초기 데이터 | D-6 (TIMESTAMP(6)) |
+| D-7 API 형식 | D-7 (오류 형식), D-12 (DB 시각 읽기) |
+| D-8 결제 이벤트 | D-8 (paymentId 연결), D-9 (중복·순서 역전), D-10 (만료와 승인 경합) |
+| (설계 원칙: 정합성은 DB로만) | D-11 (재시작 후 판매 상태 유지) |
+
 ### D-1. 점유 판정 기준: seat 행 (A안)
 - seat.status ∈ {AVAILABLE, HELD, SOLD} + seat.hold_id + seat.hold_expires_at. 점유 판정은 seat 행만 본다
 - hold(user_id, status, expires_at)와 hold_seat(선점-좌석 매핑)는 기록·조회용. hold.status가 ACTIVE여도 만료 시각이 지났으면 만료로 취급
