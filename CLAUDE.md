@@ -128,6 +128,10 @@
 - 연결: 이벤트의 holdId가 존재하는지 확인하고, 그 paymentId의 첫 이벤트에서 payment 행을 만든다.
   payment_id PK, hold_id UNIQUE → 결제 하나 ↔ 선점 하나. 기존 연결과 다른 조합이면 409 PAYMENT_CONFLICT
 - 처리 순서 (한 트랜잭션):
+  0. (트랜잭션 전) 입력 검증: eventId·paymentId·holdId 존재와 길이(컬럼 길이 이내), status ∈ {approved, cancelled},
+     occurredAt ISO-8601 형식. 위반하면 400 INVALID_REQUEST, DB 접근 없음
+     - 이유: INSERT IGNORE는 중복 키 외에 CHECK 위반도 경고(4025)로 바꿔 0행 처리함 → 검증 없으면 잘못된 이벤트가 DUPLICATE 200으로 오판됨
+       (MariaDB 11.4.13에서 스키마 테스트로 확인)
   1. INSERT IGNORE INTO payment_event … → 영향 0행이면 중복: 아무것도 바꾸지 않고 200 DUPLICATE
   2. SELECT … FROM hold WHERE id = ? FOR UPDATE → 없으면 404 HOLD_NOT_FOUND (롤백)
   3. payment 조회 → 연결 불일치이거나 동시 INSERT로 중복 키가 나면 409 PAYMENT_CONFLICT (롤백)
@@ -153,6 +157,7 @@
 - 실제 서비스라면 필요한 이벤트 서명 검증·금액 대조는 하지 않음 → NOT-DONE
 - 필수 테스트:
   - 같은 eventId 동시 N회 → payment_event 1행, 좌석 SOLD·hold CONFIRMED 한 번
+  - status가 "approve"처럼 잘못된 이벤트 → 400이고 payment_event 행이 생기지 않음 (DUPLICATE 200이 아님)
   - cancelled 먼저 → approved 나중 → 최종 CANCELLED, 좌석 AVAILABLE
   - 만료된 hold에 approved → REFUND_REQUIRED, 좌석 SOLD 아님
   - 경계 시각에 승인과 다른 사용자 재선점 동시 → 좌석은 SOLD와 새 HELD 중 하나만, 결제 상태도 그 결과와 일치
